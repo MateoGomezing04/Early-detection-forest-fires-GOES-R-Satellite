@@ -1,230 +1,253 @@
 # ==========================================================
-# SVM MODEL (Support Vector Machine) BY PRODUCT
+# SVM WITH 95% CONFIDENCE INTERVALS (PERCENTILES) BY PRODUCT
 # ==========================================================
-
+from tqdm import tqdm
 import os
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    accuracy_score, classification_report, confusion_matrix,
-    roc_auc_score, zero_one_loss
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score, confusion_matrix,
+    roc_curve, precision_recall_curve
 )
-import matplotlib.pyplot as plt
-import seaborn as sns
-import warnings
 
 warnings.filterwarnings("ignore")
 
 # ==========================================================
-# 1 INITIAL CONFIGURATION
+# CONFIGURATION
 # ==========================================================
-data_file = r"C:\Users\User\Desktop\Articuloxlsx"
-out_dir = os.path.join(os.path.dirname(data_file), "SVM_Results")
-os.makedirs(out_dir, exist_ok=True)
 
-VALIDATION_SIZE = 0.3
-RANDOM_SEED = 42
+DATA_FILE = r"C:\Users\User\Desktop\Articulo\Consolidado manual datos dia antes y dia del incendio 12h.xlsx"
+OUTPUT_DIR = os.path.join(os.path.dirname(DATA_FILE), "SVM_Results_CI_recuperado_301")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+N_ITERATIONS = 50
+TEST_SIZE = 0.30
+RANDOM_SEED_BASE = 100
+MIN_SAMPLES = 30
 
 # ==========================================================
-# 2 DATA LOADING
+# LOAD DATA
 # ==========================================================
-df = pd.read_excel(data_file)
+
+df = pd.read_excel(DATA_FILE)
 df.columns = df.columns.str.replace('[^A-Za-z0-9_]+', '', regex=True)
 
 required_cols = {'PRODUCTO', 'INCENDIO', 'Valor', 'x', 'y'}
 if not required_cols.issubset(df.columns):
-    raise ValueError(f"Missing required columns: {required_cols - set(df.columns)}")
+    raise ValueError(f"Missing columns: {required_cols - set(df.columns)}")
 
-# ==========================================================
-# 3 PROCESSING BY PRODUCT
-# ==========================================================
 products = df['PRODUCTO'].unique()
-summary_metrics = []
+global_summary = []
 
-print(f"\n📊 {len(products)} products were found in the dataset.\n")
+print(f"\n📊 {len(products)} products detected\n")
 
-for product in products:
+# ==========================================================
+# LOOP BY PRODUCT
+# ==========================================================
+
+for product in tqdm(products, desc="Processing products", unit="product"):
+
 
     subset = df[df['PRODUCTO'] == product].copy()
+    n_samples = len(subset)
 
-    if subset['INCENDIO'].nunique() < 2:
-        print(f"Product {product}: not enough classes available.\n")
+    if n_samples < MIN_SAMPLES or subset['INCENDIO'].nunique() < 2:
+        if n_samples < MIN_SAMPLES:
+            print(f"⛔ {product}: descartado por pocas muestras ({n_samples})")
+            continue
+
+        if subset['INCENDIO'].nunique() < 2:
+            print(f"⛔ {product}: descartado por una sola clase INCENDIO")
+            continue
+
         continue
 
     X = subset[['Valor', 'x', 'y']].fillna(subset[['Valor', 'x', 'y']].mean())
-    y = subset['INCENDIO'].fillna(0).astype(int)
+    y = subset['INCENDIO'].astype(int)
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y,
-        test_size=VALIDATION_SIZE,
-        random_state=RANDOM_SEED,
-        stratify=y
+    metrics_iterations = []
+
+    # ======================================================
+    # ITERATIONS
+    # ======================================================
+
+    for i in range(N_ITERATIONS):
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled,
+            y,
+            test_size=TEST_SIZE,
+            stratify=y,
+            random_state=RANDOM_SEED_BASE + i
+        )
+
+        svm = SVC(
+            kernel='linear',
+            C=1.0,
+            probability=True,
+            class_weight='balanced',
+            random_state=RANDOM_SEED_BASE + i
+        )
+
+        svm.fit(X_train, y_train)
+
+        y_pred = svm.predict(X_test)
+        y_prob = svm.predict_proba(X_test)[:, 1]
+
+        metrics_iterations.append({
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "auc": roc_auc_score(y_test, y_prob)
+        })
+
+        # Guardar última iteración para curvas clásicas
+        if i == N_ITERATIONS - 1:
+            X_train_last = X_train
+            X_test_last = X_test
+            y_train_last = y_train
+            y_test_last = y_test
+            y_pred_last = y_pred
+            y_prob_last = y_prob
+
+    metrics_df = pd.DataFrame(metrics_iterations)
+
+    # ======================================================
+    # CONFIDENCE INTERVALS (95%)
+    # ======================================================
+
+    summary = {
+        "product": product,
+        "n_samples": n_samples
+    }
+
+    for metric in metrics_df.columns:
+        summary[f"{metric}_mean"] = metrics_df[metric].mean()
+        summary[f"{metric}_p2_5"] = np.percentile(metrics_df[metric], 2.5)
+        summary[f"{metric}_p97_5"] = np.percentile(metrics_df[metric], 97.5)
+
+    global_summary.append(summary)
+
+    # ======================================================
+    # OUTPUT DIRECTORY
+    # ======================================================
+
+    prod_safe = str(product).replace(" ", "_").replace("/", "_")
+    prod_dir = os.path.join(OUTPUT_DIR, prod_safe)
+    os.makedirs(prod_dir, exist_ok=True)
+
+    metrics_df.to_csv(
+        os.path.join(prod_dir, "metrics_iterations.csv"),
+        index=False
     )
 
-    # ==========================================================
-    # 4 MAIN MODEL TRAINING
-    # ==========================================================
-    model = SVC(
-        kernel='linear',
-        probability=True,
-        class_weight='balanced',
-        random_state=RANDOM_SEED
-    )
-    model.fit(X_train, y_train)
+    # ======================================================
+    # ERROR CURVE VS C
+    # ======================================================
 
-    y_pred_train = model.predict(X_train)
-    y_pred_test = model.predict(X_test)
-    y_prob_test = model.predict_proba(X_test)[:, 1]
-
-    # ==========================================================
-    # 5 PERFORMANCE METRICS
-    # ==========================================================
-    acc_train = accuracy_score(y_train, y_pred_train)
-    acc_test = accuracy_score(y_test, y_pred_test)
-
-    report = classification_report(
-        y_test, y_pred_test,
-        output_dict=True, zero_division=0
-    )
-
-    precision = report['1']['precision']
-    recall = report['1']['recall']
-    f1 = report['1']['f1-score']
-    auc = roc_auc_score(y_test, y_prob_test)
-    cm = confusion_matrix(y_test, y_pred_test)
-    # ==========================================================
-    # 6.1 INDIVIDUAL METRICS PLOT PER PRODUCT
-    # ==========================================================
-    metrics_names = [
-        'Train Accuracy',
-        'Test Accuracy',
-        'Precision',
-        'Recall',
-        'F1-score',
-        'AUC'
-    ]
-    
-    metrics_values = [
-        acc_train,
-        acc_test,
-        precision,
-        recall,
-        f1,
-        auc
-    ]
-    
-    plt.figure(figsize=(7, 4))
-    sns.barplot(
-        x=metrics_names,
-        y=metrics_values
-    )
-    plt.ylim(0, 1)
-    plt.ylabel('Metric value')
-    plt.title(f'SVM Performance Metrics - {product}')
-    plt.xticks(rotation=30)
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(out_dir, f"Metrics_{product}.png"),
-        dpi=300
-    )
-    plt.close()
-
-    # ==========================================================
-    # 6 ERROR CURVE VS C PARAMETER (OPTION 1)
-    # ==========================================================
     C_values = np.logspace(-3, 3, 10)
     train_errors = []
     test_errors = []
 
     for C in C_values:
+
         svm_tmp = SVC(
             kernel='linear',
             C=C,
             class_weight='balanced',
-            random_state=RANDOM_SEED
+            random_state=RANDOM_SEED_BASE
         )
-        svm_tmp.fit(X_train, y_train)
+
+        svm_tmp.fit(X_train_last, y_train_last)
 
         train_errors.append(
-            zero_one_loss(y_train, svm_tmp.predict(X_train))
+            1 - accuracy_score(y_train_last, svm_tmp.predict(X_train_last))
         )
         test_errors.append(
-            zero_one_loss(y_test, svm_tmp.predict(X_test))
+            1 - accuracy_score(y_test_last, svm_tmp.predict(X_test_last))
         )
 
     plt.figure(figsize=(6, 4))
     plt.semilogx(C_values, train_errors, marker='o', label='Training error')
-    plt.semilogx(C_values, test_errors, marker='s', label='Validation error')
+    plt.semilogx(C_values, test_errors, marker='s', label='Test error')
     plt.xlabel('Regularization parameter C')
     plt.ylabel('Classification error')
-    plt.title(f'SVM Error Curve vs C - {product}')
+    plt.title(f'SVM Error vs C – {product}')
     plt.legend()
-    plt.grid(True)
+    plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"Error_Curve_C_{product}.png"), dpi=300)
+    plt.savefig(os.path.join(prod_dir, "svm_error_curve_C.png"), dpi=200)
     plt.close()
 
-    # ==========================================================
-    # 7 SAVE RESULTS
-    # ==========================================================
-    details_path = os.path.join(out_dir, f"Results_{product}.xlsx")
+    # ======================================================
+    # CONFUSION MATRIX
+    # ======================================================
 
-    metrics_df = pd.DataFrame({
-        'Metric': [
-            'Training Accuracy', 'Validation Accuracy',
-            'Precision (Fire)', 'Recall (Fire)',
-            'F1-score (Fire)', 'AUC'
-        ],
-        'Value': [acc_train, acc_test, precision, recall, f1, auc]
-    })
-
-    cm_df = pd.DataFrame(
-        cm,
-        index=['Actual_NoFire', 'Actual_Fire'],
-        columns=['Predicted_NoFire', 'Predicted_Fire']
-    )
-
-    with pd.ExcelWriter(details_path, engine='openpyxl') as writer:
-        metrics_df.to_excel(writer, sheet_name='Summary', index=False)
-        pd.DataFrame(report).transpose().to_excel(writer, sheet_name='Classification_Report')
-        cm_df.to_excel(writer, sheet_name='Confusion_Matrix')
-
-    summary_metrics.append({
-        'Product': product,
-        'Accuracy_Test': acc_test,
-        'F1_Fire': f1,
-        'AUC': auc
-    })
-
-    print(f"✅ {product}: processed successfully.\n")
-
-# ==========================================================
-# 8 GLOBAL SUMMARY
-# ==========================================================
-if summary_metrics:
-    summary_df = pd.DataFrame(summary_metrics)
-    summary_df.to_excel(
-        os.path.join(out_dir, "Global_SVM_Summary.xlsx"),
-        index=False
-    )
-
-    plt.figure(figsize=(10, 6))
-    summary_df.plot(
-        x='Product',
-        y=['Accuracy_Test', 'F1_Fire', 'AUC'],
-        kind='bar'
-    )
-    plt.ylabel('Metric value')
-    plt.ylim(0, 1)
-    plt.title('Global Comparison of SVM Performance Metrics')
+    cm = confusion_matrix(y_test_last, y_pred_last)
+    plt.figure(figsize=(4, 4))
+    plt.imshow(cm)
+    plt.title(f"Confusion Matrix – {product}")
+    plt.colorbar()
+    plt.xlabel("Predicted")
+    plt.ylabel("Observed")
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, cm[i, j], ha="center", va="center")
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "Global_SVM_Metrics.png"), dpi=300)
+    plt.savefig(os.path.join(prod_dir, "confusion_matrix.png"), dpi=200)
     plt.close()
 
-    print("📈 Global summary generated successfully.\n")
+    # ======================================================
+    # ROC CURVE
+    # ======================================================
+
+    fpr, tpr, _ = roc_curve(y_test_last, y_prob_last)
+    plt.figure(figsize=(4, 4))
+    plt.plot(fpr, tpr, label=f"AUC={roc_auc_score(y_test_last, y_prob_last):.3f}")
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    plt.title(f"ROC – {product}")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(prod_dir, "roc_curve.png"), dpi=200)
+    plt.close()
+
+    # ======================================================
+    # PRECISION–RECALL CURVE
+    # ======================================================
+
+    prec, rec, _ = precision_recall_curve(y_test_last, y_prob_last)
+    plt.figure(figsize=(4, 4))
+    plt.plot(rec, prec)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Precision–Recall – {product}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(prod_dir, "precision_recall.png"), dpi=200)
+    plt.close()
+
+    print(f"✅ {product}: completed")
+
+# ==========================================================
+# GLOBAL SUMMARY
+# ==========================================================
+
+summary_df = pd.DataFrame(global_summary)
+summary_df.to_csv(
+    os.path.join(OUTPUT_DIR, "SVM_summary_confidence_intervals.csv"),
+    index=False
+)
+
+print("\n📈 SVM analysis with confidence intervals completed successfully.")
