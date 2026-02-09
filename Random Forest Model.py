@@ -1,218 +1,228 @@
-
-#Codigo para modelo Random Forest
-
+# ============================================================
+# RANDOM FOREST WITH 95% CONFIDENCE INTERVALS (PERCENTILES)
+# ============================================================
 
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    accuracy_score, classification_report,
-    confusion_matrix, roc_auc_score, roc_curve,
-    precision_recall_curve, f1_score, precision_score, recall_score
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score,
+    confusion_matrix, roc_curve, precision_recall_curve,
+    ConfusionMatrixDisplay
 )
-import matplotlib.pyplot as plt
 
-# ---------- CONFIG ----------
-FILE_NAME = r"C:\Users\User\Desktop\Articulo.xlsx"
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+FILE_NAME = r"C:\Users\User\Desktop\Articulo\Consolidado manual datos dia antes y dia del incendio 12h.xlsx"
 SHEET_NAME = "Sheet1"
-VALIDATION_SIZE = 0.3
-RANDOM_SEED = 42
-MIN_SAMPLES = 30
-OUTPUT_DIR = r"C:\Users\User\Desktop\Articulo\RF_Results"
+
+OUTPUT_DIR = r"C:\Users\User\Desktop\Articulo\RF_Results_CI_Final"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------- CARGA ----------
+N_ITERATIONS = 100
+TEST_SIZE = 0.30
+RANDOM_SEED_BASE = 100
+MIN_SAMPLES = 30
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
 df = pd.read_excel(FILE_NAME, sheet_name=SHEET_NAME)
 df.columns = df.columns.str.strip()
 
-# Detectar columnas clave
-product_col_candidates = ['PRODUCTO', 'Producto', 'producto', 'PRODUCT', 'PRODUCT_NAME']
-product_col = next((c for c in product_col_candidates if c in df.columns), None)
-if product_col is None:
-    raise ValueError("No se encontró columna de producto ('PRODUCTO' o similar).")
+product_col = next(c for c in df.columns if c.lower() == "producto")
+value_col = next(c for c in df.columns if c.lower() == "valor")
+target_col = next(c for c in df.columns if c.lower() == "incendio")
 
-valor_col_candidates = ['VALOR', 'Valor', 'valor', 'Value']
-valor_col = next((c for c in valor_col_candidates if c in df.columns), None)
-if valor_col is None:
-    raise ValueError("No se encontró columna 'VALOR' en el Excel.")
+x_col = next((c for c in df.columns if c.lower() in ["x", "x_grid", "lon"]), None)
+y_col = next((c for c in df.columns if c.lower() in ["y", "y_grid", "lat"]), None)
 
-y_candidates = ['y_grid', 'y', 'Y', 'lat', 'LAT']
-x_candidates = ['x_grid', 'x', 'X', 'lon', 'LON']
-y_col = next((c for c in y_candidates if c in df.columns), None)
-x_col = next((c for c in x_candidates if c in df.columns), None)
+products = df[product_col].unique()
+global_summary = []
 
-target_candidates = ['INCENDIO', 'Incendio', 'incendio']
-target_col = next((c for c in target_candidates if c in df.columns), None)
-if target_col is None:
-    raise ValueError("No se encontró la columna objetivo 'INCENDIO' en el Excel.")
+# ============================================================
+# LOOP BY PRODUCT
+# ============================================================
 
-# ---------- ITERAR POR PRODUCTO ----------
-productos = df[product_col].unique()
-print(f"Productos detectados ({len(productos)}): {productos}")
-resumenes_globales = []
+for product in products:
 
-for prod in productos:
-    subset = df[df[product_col] == prod].copy()
-    n = len(subset)
-    print(f"\n--- Procesando producto: {prod} (n = {n}) ---")
-    if n < MIN_SAMPLES:
-        print(f"  Saltado: menos de {MIN_SAMPLES} muestras.")
+    subset = df[df[product_col] == product].copy()
+    n_samples = len(subset)
+
+    if n_samples < MIN_SAMPLES or subset[target_col].nunique() < 2:
         continue
 
-    if subset[target_col].nunique() < 2:
-        print("  Saltado: no contiene ambas clases (0 y 1).")
-        continue
+    predictors = [value_col]
+    if x_col and y_col:
+        predictors.extend([x_col, y_col])
 
-    predictors = [valor_col]
-    if y_col is not None and x_col is not None:
-        predictors += [y_col, x_col]
-    predictors = [p for p in predictors if p in subset.columns]
-
-    X = subset[predictors].copy()
-    y = subset[target_col].fillna(0).astype(int)
-    X = X.fillna(X.mean())
+    X = subset[predictors].fillna(subset[predictors].mean())
+    y = subset[target_col].astype(int)
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
 
-    try:
+    metrics_iterations = []
+
+    all_y_true = []
+    all_y_pred = []
+    all_y_prob = []
+
+    # ========================================================
+    # MONTE CARLO ITERATIONS
+    # ========================================================
+
+    for i in range(N_ITERATIONS):
+
         X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y,
-            test_size=VALIDATION_SIZE,
-            random_state=RANDOM_SEED,
-            stratify=y
+            X_scaled,
+            y,
+            test_size=TEST_SIZE,
+            stratify=y,
+            random_state=RANDOM_SEED_BASE + i
         )
-    except Exception as e:
-        print(f"  Error en train_test_split: {e}")
-        continue
 
-    rf = RandomForestClassifier(n_estimators=100, random_state=RANDOM_SEED, class_weight='balanced')
-    rf.fit(X_train, y_train)
-    y_pred_test = rf.predict(X_test)
-    y_proba_test = rf.predict_proba(X_test)[:, 1] if hasattr(rf, "predict_proba") else None
+        rf = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=None,
+            min_samples_leaf=1,
+            max_features="sqrt",
+            class_weight="balanced",
+            random_state=RANDOM_SEED_BASE + i,
+            n_jobs=-1
+        )
 
-    acc = accuracy_score(y_test, y_pred_test)
-    prec = precision_score(y_test, y_pred_test, zero_division=0)
-    rec = recall_score(y_test, y_pred_test, zero_division=0)
-    f1 = f1_score(y_test, y_pred_test, zero_division=0)
-    auc = roc_auc_score(y_test, y_proba_test) if y_proba_test is not None else np.nan
+        rf.fit(X_train, y_train)
 
-    print(f"  Accuracy: {acc:.4f}  Precision: {prec:.4f}  Recall: {rec:.4f}  F1: {f1:.4f}  AUC: {auc if not np.isnan(auc) else 'N/A'}")
+        y_pred = rf.predict(X_test)
+        y_prob = rf.predict_proba(X_test)[:, 1]
 
-    prod_safe = str(prod).replace(" ", "_").replace("/", "_")
-    out_dir = os.path.join(OUTPUT_DIR, prod_safe)
-    os.makedirs(out_dir, exist_ok=True)
+        all_y_true.append(y_test)
+        all_y_pred.append(y_pred)
+        all_y_prob.append(y_prob)
 
-    # ---- Matriz de confusión ----
-    cm = confusion_matrix(y_test, y_pred_test)
-    plt.figure(figsize=(4,4))
-    plt.imshow(cm, interpolation='nearest')
-    plt.title(f"Confusion matrix - {prod}")
-    plt.colorbar()
-    plt.xlabel('Predicted')
-    plt.ylabel('Real')
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            plt.text(j, i, cm[i, j], ha="center", va="center", color="white" if cm[i,j] > cm.max()/2 else "black")
+        metrics_iterations.append({
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "auc": roc_auc_score(y_test, y_prob)
+        })
+
+    metrics_df = pd.DataFrame(metrics_iterations)
+
+    # ========================================================
+    # CONFIDENCE INTERVALS
+    # ========================================================
+
+    summary = {
+        "product": product,
+        "n_samples": n_samples
+    }
+
+    for metric in metrics_df.columns:
+        summary[f"{metric}_mean"] = metrics_df[metric].mean()
+        summary[f"{metric}_p2_5"] = np.percentile(metrics_df[metric], 2.5)
+        summary[f"{metric}_p97_5"] = np.percentile(metrics_df[metric], 97.5)
+
+    global_summary.append(summary)
+
+    # ========================================================
+    # OUTPUT DIRECTORIES
+    # ========================================================
+
+    product_dir = os.path.join(OUTPUT_DIR, str(product).replace(" ", "_"))
+    os.makedirs(product_dir, exist_ok=True)
+
+    plots_dir = os.path.join(product_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+
+    metrics_df.to_csv(
+        os.path.join(product_dir, "metrics_iterations.csv"),
+        index=False
+    )
+
+    # ========================================================
+    # CONFUSION MATRIX (GLOBAL)
+    # ========================================================
+
+    y_true_all = np.concatenate(all_y_true)
+    y_pred_all = np.concatenate(all_y_pred)
+
+    cm = confusion_matrix(y_true_all, y_pred_all)
+
+    plt.figure(figsize=(4, 4))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot(cmap="Blues", colorbar=True)
+    plt.title(f"Confusion Matrix – {product}")
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "confusion_matrix.png"), dpi=150)
+    plt.savefig(os.path.join(plots_dir, "confusion_matrix.png"), dpi=200)
     plt.close()
 
-    # ---- ROC y AUC ----
-    if y_proba_test is not None:
-        fpr, tpr, _ = roc_curve(y_test, y_proba_test)
-        plt.figure(figsize=(4,4))
-        plt.plot(fpr, tpr, label=f"AUC={auc:.3f}")
-        plt.plot([0,1],[0,1],'k--')
-        plt.xlabel("FPR")
-        plt.ylabel("TPR")
-        plt.title(f"ROC - {prod}")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "roc_curve.png"), dpi=150)
-        plt.close()
+    # ========================================================
+    # ROC CURVE (MEAN)
+    # ========================================================
 
-    # ---- Precision-Recall ----
-    if y_proba_test is not None:
-        precision_vals, recall_vals, _ = precision_recall_curve(y_test, y_proba_test)
-        plt.figure(figsize=(4,4))
-        plt.plot(recall_vals, precision_vals)
-        plt.xlabel("Recall")
-        plt.ylabel("Precision")
-        plt.title(f"Precision-Recall - {prod}")
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "precision_recall.png"), dpi=150)
-        plt.close()
+    mean_fpr = np.linspace(0, 1, 100)
+    tprs = []
 
-    # ---- Importancia de variables ----
-    importances = pd.Series(rf.feature_importances_, index=X.columns).sort_values()
-    plt.figure(figsize=(5, max(2, len(importances)*0.4)))
-    importances.plot(kind='barh')
-    plt.title(f"Importance - {prod}")
+    for yt, yp in zip(all_y_true, all_y_prob):
+        fpr, tpr, _ = roc_curve(yt, yp)
+        tprs.append(np.interp(mean_fpr, fpr, tpr))
+
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_auc = metrics_df["auc"].mean()
+
+    plt.figure(figsize=(4, 4))
+    plt.plot(mean_fpr, mean_tpr, label=f"Mean AUC = {mean_auc:.3f}")
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(f"ROC Curve – {product}")
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "feature_importances.png"), dpi=150)
+    plt.savefig(os.path.join(plots_dir, "roc_curve.png"), dpi=200)
     plt.close()
 
-    # ---- Guardar resumen individual ----
-    resumen_df = pd.DataFrame({
-        "product": [prod],
-        "n_samples": [n],
-        "accuracy": [acc],
-        "precision": [prec],
-        "recall": [rec],
-        "f1": [f1],
-        "auc": [auc]
-    })
-    resumen_df.to_csv(os.path.join(out_dir, "resumen_metricas.csv"), index=False)
+    # ========================================================
+    # PRECISION–RECALL CURVE (MEAN)
+    # ========================================================
 
-    resumenes_globales.append(resumen_df)
+    recalls = np.linspace(0, 1, 100)
+    precisions = []
 
-# ---------- GUARDAR RESUMEN GLOBAL ----------
-if resumenes_globales:
-    resumen_global = pd.concat(resumenes_globales, ignore_index=True)
-    resumen_global.to_csv(os.path.join(OUTPUT_DIR, "resumen_global.csv"), index=False)
-    print(f"\n Resumen global guardado en: {os.path.join(OUTPUT_DIR, 'resumen_global.csv')}")
-    
-    # ---------- IDENTIFICAR EL MEJOR PRODUCTO ----------
-try:
-    # Criterio principal: F1-Score (puedes cambiarlo a 'auc' si prefieres)
-    mejor_producto = resumen_global.loc[resumen_global["f1"].idxmax()]
-    print("\n El mejor producto para predecir incendios es:")
-    print(mejor_producto[["producto", "f1", "accuracy", "precision", "recall", "auc"]])
+    for yt, yp in zip(all_y_true, all_y_prob):
+        p, r, _ = precision_recall_curve(yt, yp)
+        precisions.append(np.interp(recalls, r[::-1], p[::-1]))
 
-    # Guardar también en un archivo de texto
-    with open(os.path.join(OUTPUT_DIR, "mejor_producto.txt"), "w") as f:
-        f.write("=== MEJOR PRODUCTO PARA PREDICCIÓN DE INCENDIOS ===\n\n")
-        f.write(f"Producto: {mejor_producto['producto']}\n")
-        f.write(f"F1-Score: {mejor_producto['f1']:.4f}\n")
-        f.write(f"Accuracy: {mejor_producto['accuracy']:.4f}\n")
-        f.write(f"Precision: {mejor_producto['precision']:.4f}\n")
-        f.write(f"Recall: {mejor_producto['recall']:.4f}\n")
-        f.write(f"AUC: {mejor_producto['auc']:.4f}\n")
-    print(f"\n Archivo con el mejor producto guardado en: {os.path.join(OUTPUT_DIR, 'mejor_producto.txt')}")
-except Exception as e:
-    print(f"\n No se pudo determinar el mejor producto: {e}")
-    # ---------- GRÁFICA COMPARATIVA DE PRODUCTOS ----------
-    try:
-        plt.figure(figsize=(10, 6))
-        resumen_plot = resumen_global.sort_values(by="f1", ascending=False)
-        plt.bar(resumen_plot["producto"], resumen_plot["f1"], color="steelblue", label="F1-Score")
-        plt.xlabel("Producto satelital")
-        plt.ylabel("F1-Score")
-        plt.title("Comparación de desempeño por producto")
-        plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
-        plt.legend()
-        plt.savefig(os.path.join(OUTPUT_DIR, "comparacion_productos.png"), dpi=200)
-        plt.close()
+    mean_precision = np.mean(precisions, axis=0)
 
-        print(f" Gráfica comparativa guardada en: {os.path.join(OUTPUT_DIR, 'comparacion_productos.png')}")
-    except Exception as e:
-        print(f" No se pudo generar la gráfica comparativa: {e}")
+    plt.figure(figsize=(4, 4))
+    plt.plot(recalls, mean_precision)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Precision–Recall Curve – {product}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, "precision_recall.png"), dpi=200)
+    plt.close()
 
-else:
-    print("\n No se generó ningún resumen global (posiblemente no hubo productos válidos).")
+# ============================================================
+# SAVE GLOBAL SUMMARY
+# ============================================================
+
+summary_df = pd.DataFrame(global_summary)
+summary_df.to_csv(
+    os.path.join(OUTPUT_DIR, "RF_summary_confidence_intervals.csv"),
+    index=False
+)
+
+print("Random Forest analysis with confidence intervals completed successfully.")
